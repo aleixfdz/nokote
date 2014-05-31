@@ -71,7 +71,7 @@ class NokoteParser
 
 
   def generate_tag doc
-    tag = encode SecureRandom.hex(32)
+    tag = encode SecureRandom.hex(8)
     (doc.include? tag) ? (generate_tag doc) : tag
   end
 
@@ -83,7 +83,7 @@ class NokoteParser
     next_pos = 0
     o = ''
     pos.each_slice(2).each do |b,e|
-      o += i[next_pos..b-next_pos-1]
+      o += i[next_pos..b-1]
       o += tag + (encode i[b+dl..e-1]) + tag
       next_pos = e + dl
     end

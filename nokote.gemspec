@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.authors       = ["Aleix Fernández Donis"]
   spec.email         = ["aleixfdz@gmail.com"]
   spec.summary       = %q{Parse HTML documents writing HTML templates.}
-  spec.description   = %q{Parse HTML documents writing HTML templates with ruby code embed}
+  spec.description   = %q{Parse HTML documents writing HTML templates embedding ruby code.}
   spec.homepage      = ""
   spec.license       = "MIT"
 

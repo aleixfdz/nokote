@@ -20,8 +20,8 @@ class NokoteParser
     @data = data
     @tag = generate_tag doc
     template = pack @plain_template
-    template = Nokogiri::HTML::DocumentFragment.parse template
-    doc = Nokogiri::HTML::DocumentFragment.parse doc
+    template = html_parse template
+    doc = html_parse doc
     begin
       match_node template, doc
     rescue NotokeParserError => ex
@@ -33,6 +33,30 @@ class NokoteParser
 
 
  private
+  def html_parse doc
+    doc = Nokogiri::HTML::DocumentFragment.parse doc
+    normalize doc
+    doc
+  end
+
+  # all element has at least one children
+  # every children that is not a Text has the previous and next siblings are Text
+  def normalize node
+    # this code works because Text nodes are merged whether it is possible
+    node.add_child (new_empty_node node) if node.children.empty?
+    prev_is_text = false
+    node.children.each do |c|
+      c.add_previous_sibling (new_empty_node node)
+      normalize c
+      c.add_next_sibling (new_empty_node node)
+    end
+  end
+  def new_empty_node node
+    Nokogiri::XML::Text.new '', node.document
+  end
+
+
+
   def init_encode
     Base32.table = 'abcdefghijklmnopqrstuvwxyzABCDEF'
   end

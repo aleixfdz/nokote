@@ -1,4 +1,4 @@
 a<b id="value">&&
 tp.data.field = tp.node
-!tp.data.field == 'x'
+tp.data.field == 'x'
 &&</b>

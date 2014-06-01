@@ -20,13 +20,16 @@ class NokoteParser
     @data = data
     @tag = generate_tag doc
     template = pack @plain_template
+    puts @plain_template
+    puts template
     template = html_parse template
+    puts template.content
     doc = html_parse doc
     begin
-      match_node template, doc
+      match_node template, doc, 'document'
     rescue NotokeParserError => ex
-      # error_message.replace "#{ex.to_s}\n  " + ex.backtrace.join("\n  ") if error_message
-      error_message.replace ex.to_s if error_message
+      error_message.replace "#{ex.to_s}\n  " + ex.backtrace.join("\n  ") if error_message
+      # error_message.replace ex.to_s if error_message
       return false
     end
   end
@@ -62,13 +65,25 @@ class NokoteParser
   end
 
   def decode string
-    Base32.decode string
+    Base32.decode (decode2 string)
   end
 
   def encode string
-    (Base32.encode string).gsub /[=]+$/, ''
+    encode2 ((Base32.encode string).gsub /[=]+$/, '')
   end
 
+  def encode2 string
+    s = string
+    ['z','A','B','C','D','E','F'].each {|c| s = s.gsub(c, 'z'+c.downcase)}
+    s
+  end
+
+  def decode2 string
+    s = string
+    s = s.gsub /z(.)/, '$\1'
+    ['z','A','B','C','D','E','F'].each {|c| s = s.gsub('$'+c.downcase, c)}
+    s
+  end
 
   def generate_tag doc
     tag = encode SecureRandom.hex(8)
@@ -82,15 +97,21 @@ class NokoteParser
     assert (pos.size%2 == 0), "invalid tag"
     next_pos = 0
     o = ''
+    puts o
     pos.each_slice(2).each do |b,e|
       o += i[next_pos..b-1]
+      puts o
       o += tag + (encode i[b+dl..e-1]) + tag
+      puts o
       next_pos = e + dl
     end
     o += i[next_pos..-1]
+    puts o
+    o
   end
 
   def unpack str
+    # TODO what a empty unpacked is depends on the context
     return nil if !str.start_with? tag
     str = str[tag.length..-1]
     return nil if !str.end_with? tag
@@ -104,27 +125,32 @@ class NokoteParser
     @dcur = d if d.class <= Nokogiri::XML::Node
   end
 
-  def match_node t, d
+  def match_nodea t, d
+    match_node t, d, 'attr'
+  end
+  def match_nodec t, d
+    match_node t, d, 'child'
+  end
+  def match_node t, d, s = nil
     # basic check stuff
     set_context t, d
-    puts "#{t.class} : #{t} vs #{d}"
+    puts "#{s}> #{t.class} : #{t} vs #{d}"
     return true if t == nil and d == nil
     assert (t != nil or d != nil), "unexpected end of file"
     assert (t.class == d.class), "different class"  # TODO add support insert code &&!
 
     # special match anything inside the tag <&&#tag!></&&#tag!>
-    return eval_code d.content, "error match #tag!" if (unpack t.name) == '#tag!'
+    # return eval_code d.content, "error match #tag!" if (unpack t.name) == '#tag!'
 
     # attributes
-    ta = t.attribute_nodes.sort
-    da = d.attribute_nodes.sort
-    (ta.zip da).all? {|dt| match_node *dt}
+    ta = t.attribute_nodes
+    da = d.attribute_nodes
+    (zip_attributes ta, da).all? {|dt| match_nodea *dt}
     # retrieve context
     set_context t, d
 
-    # special match anything inside the tag <&&#tag></&&#tag> after having check
     # the attributes
-    return eval_code d.content, "error match #tag!" if (unpack t.name) == '#tag'
+    # return eval_code d.content, "error match #tag!" if (unpack t.name) == '#tag'
 
     # name
     match_string t.name, d.name
@@ -133,12 +159,39 @@ class NokoteParser
     match_string t.content, d.content if t.class == Nokogiri::XML::Text
 
     # children
-    assert (t.children.zip d.children).all? {|dt| match_node *dt}, "children"
-
-    # continue with the sibling
-    match_node t.next_sibling, d.next_sibling
+    assert (t.children.zip d.children).all? {|dt| match_nodec *dt}
   end
 
+  def zip_attributes ta, da
+    # TODO deal with repeated attributes
+    ta = ta.sort
+    da = da.sort
+
+    open = ta.any? {|a| (unpack a.name) == '#open' && a.value == 'true'}
+    optional = ta.map {|a| (unpack a.name) == '#optional' ? (a.value.split ' ') : []}.flatten
+    ignore = ta.map {|a| (unpack a.name) == '#ignore' ? (a.value.split ' ') : []}.flatten
+    ta.reject! {|a| ['#open', '#optional', '#ignore'].include? (unpack a.name)}
+    puts "open #{open}, optional #{optional}, ignore #{ignore}"
+
+    ztd = []
+    ta.each do |t|
+      d = da.find {|a| a.name == t.name}
+      if d == nil
+        if !optional.include? t.name
+          assert! "not found attribute #{t.name}"
+        end
+      else
+        da.delete_at (da.index d)
+        ztd << [t, d]
+      end
+    end
+
+    puts "#{open}, #{da.all? {|a| ignore.include? a.name}}, wat #{da}"
+
+    assert (open || da.all? {|a| ignore.include? a.name}), "found unknown attribute"
+    puts "ztd #{ztd}, ignored #{da}"
+    ztd
+  end
 
   def match_string t, d
     code = unpack t

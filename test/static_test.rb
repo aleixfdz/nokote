@@ -22,7 +22,7 @@ class StaticTest < Minitest::Test
     err = ''
     out = parser.parse (IO.read html), out_data, err
     if res
-      assert out, "not parsed valid document"
+      assert out, "not parsed valid document #{err}"
       res_output = IO.read res
       res_data = JSON.parse res_output, object_class: OpenStruct
       assert out_data == res_data, "invalid data generated #{out_data} #{res_data}"

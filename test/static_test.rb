@@ -17,10 +17,9 @@ class StaticTest < Minitest::Test
   end
 
   def parse_and_compare template, html, res
-    parser = Nokote::NokoteParser.new (IO.read template)
     out_data = OpenStruct.new
     err = ''
-    out = parser.parse (IO.read html), out_data, err
+    out = Nokote::NokoteParser.parse_document (IO.read template), (IO.read html), out_data, err
     if res
       assert out, "not parsed valid document #{err}"
       res_output = IO.read res
@@ -28,7 +27,6 @@ class StaticTest < Minitest::Test
       assert out_data == res_data, "invalid data generated #{out_data} #{res_data}"
     else
       assert !out, "parsed invalid document"
-      puts "error: #{err}"
     end
   end
 end

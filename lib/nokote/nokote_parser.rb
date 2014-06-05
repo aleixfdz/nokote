@@ -1,10 +1,10 @@
 require 'base32'
 require 'securerandom'
 require 'nokogiri'
+require_relative 'nokote_grammar.rb'
 
 
 # TODO add debug mode please
-#
 
 module Nokote
 
@@ -12,9 +12,6 @@ module Nokote
 class NokoteParser
  public
 =begin
-  def initialize templates, rules
-    @plain_templates = templates
-    @rules = rules
   end
 
   def parse doc, rule, data = nil, error_message = nil, err = nil
@@ -48,37 +45,9 @@ class NokoteParser
       false
     end
   end
-
-
-  def initialize template, tag, otag = '&&', str_cmp = nil
-    @plain_template = template
-    @dtag = dtag
-    # TODO use str_cmp depending on name, value, content, and passing context...
-    init_encode
-  end
-
-  def load doc, data = nil, error_message = nil, err = nil
-    @err = err ? err : STDERR
-    @data = data
-    @tag = generate_tag doc
-    template = pack @plain_template
-    puts @plain_template
-    puts template
-    template = html_parse template
-    puts template.content
-    doc = html_parse doc
-    begin
-      last_node = match_node template, doc, 'document'
-      assert last_node == nil, "document has more nodes #{last_node}"
-    rescue NotokeParserError => ex
-      error_message.replace "#{ex.to_s}\n  " + ex.backtrace.join("\n  ") if error_message
-      # error_message.replace ex.to_s if error_message
-      return false
-    end
-  end
-
-
 =end
+
+
   # TODO change all this shit
   def self.init_encode
     Base32.table = 'abcdefghijklmnopqrstuvwxyzABCDEF'
@@ -87,25 +56,36 @@ class NokoteParser
   def self.parse_document template, doc, data = nil, error_message = nil, template_tag = '&&'
     init_encode
     tag = generate_tag doc
-    parser = self.new template, tag, template_tag
-    doc = html_parse doc
-    res = parser.parse doc, data, error_message
-    return true if res == nil
-    error_message.replace 'template ended at #{res}' if res != false
-    false
+    parser = self.new({'0' => '#t'}, {'t' => template}, tag, template_tag)
+    parser.parse_doc '0', doc, data, error_message
   end
 
-  def initialize template, secure_tag, template_tag = '&&'
+  def initialize rules, templates, secure_tag, template_tag = '&&'
     @dtag = template_tag
     @tag = secure_tag
-    packed_template = self.class.pack template, tag, dtag
-    raise ArgumentError, "invalid template #{template}" if !packed_template
-    @template = self.class.html_parse packed_template
+    raise ArgumentError, "invalid rule name" if rules.keys.any? {|n| n[0] == '#'}
+    @templates = {}
+    templates.each {|k,v| @templates[k] = self.class.html_parse (self.class.pack v, tag, dtag)}
+    #@templates = Hash[*templates.map {|k,v| [k, self.class.html_parse (self.class.pack v, tag, dtag)]}.flatten]
+    raise ArgumentError, "invalid templates #{templates}" if !@templates.all?
+    @rules = rules
+    @backtrack = []
+    puts "#{@rules}\n#{@templates}"
   end
 
+  def parse_doc rt, doc, data = nil, error_message = nil
+    node = self.class.html_parse doc
+    parse rt, node.children[0], data, error_message
+  end
+  def parse rt, node, data = nil, error_message = nil
+    @data = data
+    resolve rt, node
+  end
+
+=begin
   # return false if node cannot be parsed by template, otherwise return the
   # first not parsed node
-  def parse node, data = nil, error_message = nil
+  def match node, data = nil, error_message = nil
     @data = data
     begin
       match_node @template, node, 'document'
@@ -114,8 +94,103 @@ class NokoteParser
       return false
     end
   end
+=end
 
  private
+  def resolve rt, node
+    res = resolve_impl rt, node
+    backtrack! while !res and backtrack?
+    res
+  end
+
+  def resolve_impl rt, node
+    if rt[0] == '#'
+      template = @templates[rt[1..-1]]
+      raise ArgumentError 'not found template #{rt[1..-1]}' if template == nil
+      match_template template, node
+    else
+      rule = @rules[rt]
+      raise ArgumentError 'not found rule #{rt}' if rule == nil
+      resolve_rule rule, node
+    end
+  end
+
+  def add_backtrack cc, debug_message = nil
+   @backtrack.push cc 
+  end
+
+  def backtrack?
+    !@backtrack.empty?
+  end
+
+  def backtrack!
+    backtrack.pop.call
+  end
+
+  def resolve_rule rule, node
+    puts "apply #{rule} at #{node}"
+    case rule
+    when Optional
+      rules = rule.rules.dup
+      return true if rules.empty?  # TODO warn about empty?
+      context = nil
+      callcc {|cc| context = cc}
+      return false if rules.empty?
+      add_backtrack context, "#{rule} : #{rules}"
+      resolve_impl rules.shift, node
+    when Concat
+      rule.rules.each do |r_id|
+        node = resolve_impl r_id, node
+        return false if node == false
+      end
+      node
+    when Repeat
+      (0..rule.min-1).each do
+        node = resolve_impl rule.rule, node
+        return false if node == false
+      end
+      nodes = [node]
+      (0..rule.max-1).each do  # TODO max -1 is infinity...
+        node = resolve_impl rule.rule, node
+        break if node == false
+        nodes.push node
+        # TODO warn if no consuming?
+      end
+      context = nil
+      callcc {|cc| context = cc}
+      return false if nodes.empty?
+      add_backtrack context, "#{rule} : #{nodes}"
+      nodes.pop
+    when OnCandidates
+      nodes = rule.generator.call node
+      return false if nodes.empty?
+      context = nil
+      callcc {|cc| context = cc}
+      return false if nodes.empty?
+      add_backtrack context, "#{rule} : #{nodes}"
+      resolve_impl rule.rule, nodes.shift
+    when Empty
+      node
+    when FinalNode
+      node == nil ? nil : false
+    when String
+      resolve_impl rule, node
+    else
+      raise ArgumentError, "invalid rule #{rule}"
+      return false
+    end
+  end
+
+  def match_template template, node
+    puts "match #{template} at #{node}"
+    begin
+      match_node template.children[0], node
+    rescue NotokeParserError => ex
+      false
+    end
+  end
+
+
   def self.html_parse doc
     doc = Nokogiri::HTML::DocumentFragment.parse doc
     normalize doc
@@ -285,7 +360,13 @@ class NokoteParser
       re = Regexp.new code[1..-2]
       assert (re.match node), "regexp failed"
     else
-      assert (eval code, (default_binding node)), "code evaluation fail"
+      res = eval code, (default_binding node)
+      if res < NokoteGrammar
+        #node = (resolve res, node)
+        puts "jump from #{node} to ..."
+        assert! "not implemented jumps"
+      end
+      true
     end
   end
 
@@ -338,9 +419,16 @@ class NokoteParser
     # TODO print the attributes in a better way
     # TODO improve track
     # TODO unpack
-    raise NotokeParserError, "error at template:#{@tcur.line} document:#{@dcur.line} #{msg}
+    if !cond
+      message = %q(error matching at template:#{@tcur.line} document:#{@dcur.line} #{msg}
   template_node: #{@tcur}
-  document_node: #{@dcur}" if !cond
+  document_node: #{@dcur}
+  at
+  #{caller.join("\n  ")})
+      puts message
+      raise NotokeParserError, message
+      return false
+    end
     true
   end
 end

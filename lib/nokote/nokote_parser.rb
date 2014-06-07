@@ -1,6 +1,8 @@
 require 'base32'
-require 'securerandom'
+require 'htmlentities'
 require 'nokogiri'
+require 'securerandom'
+require 'set'
 require_relative 'nokote_grammar.rb'
 
 
@@ -16,6 +18,27 @@ class NokoteParser
     Base32.table = 'abcdefghijklmnopqrstuvwxyzABCDEF'
   end
 
+  def self.load_grammar file, secure_tag, template_tag = '&&'
+    path =  File.dirname file
+    rules = eval (IO.read file)
+    templates_name = Set.new rules.keys.reject {|r| r[0] != '#'}
+    puts "#{templates_name.to_a}"
+    templates_name.merge (Set.new rules.values.map {|r| r.subrules}.flatten)
+    puts "#{templates_name.to_a}"
+    templates_name.map! {|thn| thn[1..-1]}
+    templates = {}
+    templates_name.each {|tn| templates[tn] = IO.read (path + '/' + tn)}
+    raise ArgumentError, "invalid template names #{templates_name}" if !templates.all?
+    self.new rules, templates, secure_tag, template_tag
+  end
+
+  def self.load_grammar_and_parse_document file, first_rule, doc, data = nil, error_message = nil, template_tag = '&&'
+    init_encode
+    tag = generate_tag doc
+    parser = load_grammar file, tag, template_tag
+    nil == (parser.parse_doc first_rule, doc, data, error_message)
+  end
+
   def self.parse_document template, doc, data = nil, error_message = nil, template_tag = '&&'
     init_encode
     tag = generate_tag doc
@@ -24,6 +47,7 @@ class NokoteParser
   end
 
   def initialize rules, templates, secure_tag, template_tag = '&&'
+    @@html_entities = HTMLEntities.new
     @dtag = template_tag
     @tag = secure_tag
     raise ArgumentError, "invalid rule name" if rules.keys.any? {|n| n[0] == '#'}
@@ -38,8 +62,9 @@ class NokoteParser
 
   def parse_doc rt, doc, data = nil, error_message = nil
     node = self.class.html_parse doc
-    parse rt, node, data, error_message
+    parse rt, node.children.first, data, error_message
   end
+
   def parse rt, node, data = nil, error_message = nil
     @data = data
     resolve rt, node
@@ -53,8 +78,11 @@ class NokoteParser
     res
   end
 
+  # returns false if it was not possible to parse
+  # otherwise return the first node not parsed (nil)
+  # it attempts to parse node and its siblings...
   def resolve_impl rt, node
-    puts "resolve_impl #{rt} at #{node.class}:#{node}..."
+    puts "resolve impl #{rt} at #{node.class} : #{node}"
     if rt.class < NokoteGrammar
       res = resolve_rule rt, node
     elsif rt[0] != '#'
@@ -66,7 +94,7 @@ class NokoteParser
       raise ArgumentError, "not found template #{rt[1..-1]}" if template == nil
       res = match_template template, node
     end
-    puts "resolved #{rt} at #{node.class}:#{node} : #{res == nil ? "nil" : res}"
+    puts "resolved #{rt} at #{node.class} #{node} : #{res == nil ? "nil" : res}"
     res
   end
 
@@ -84,6 +112,9 @@ class NokoteParser
     backtrack.pop.call
   end
 
+  # returns false if it was not possible to parse
+  # otherwise return the first node not parsed (nil)
+  # it attempts to parse node and its siblings...
   def resolve_rule rule, node
     puts " apply #{rule} at #{node}"
     case rule
@@ -107,7 +138,7 @@ class NokoteParser
         return false if node == false
       end
       nodes = [node]
-      (0..rule.max-1).each do  # TODO max -1 is infinity...
+      (0..rule.max-1).each do
         node = resolve_impl rule.rule, node
         break if node == false
         nodes.push node
@@ -118,6 +149,9 @@ class NokoteParser
       return false if nodes.empty?
       add_backtrack context, "#{rule} : #{nodes}"
       nodes.pop
+=begin
+TODO add cardinality depending on number of candidates?
+TODO make that the node return is the next...
     when OnCandidates
       nodes = rule.generator.call node
       return false if nodes.empty?
@@ -126,6 +160,7 @@ class NokoteParser
       return false if nodes.empty?
       add_backtrack context, "#{rule} : #{nodes}"
       resolve_impl rule.rule, nodes.shift
+=end
     when Empty
       node
     when FinalNode
@@ -138,10 +173,25 @@ class NokoteParser
     end
   end
 
+  # returns false if it was not possible to parse
+  # otherwise return the first node not parsed (nil)
+  # it attempts to parse node and its siblings... TODO
   def match_template template, node
     puts " match #{template} at #{node}"
     begin
-      match_node template, node
+      t = template.children.first
+      # try adjusting node if it can be required
+      # note that if t.content.empty? we don't want to skip it...
+      # TODO template limitation per node...
+      t = t.next_sibling if node.class != Nokogiri::XML::Text and t.content.empty?
+      while t != nil and node != nil
+        set_context t, node
+        match_node t, node
+        t = t.next_sibling
+        node = node.next_sibling
+      end
+      assert (t == nil or node != nil), "unexpected end of document #{t.class}, #{node.class}"
+      node
     rescue NotokeParserError => ex
       puts "match fails #{ex}"
       false
@@ -205,6 +255,7 @@ class NokoteParser
 
 
 
+  # TODO ugly, refactor, it should accept open and end tags...
   def self.pack i, tag, dtag
     dl = dtag.length
     pos = i.enum_for(:scan, dtag).map {Regexp.last_match.begin(0)}
@@ -212,22 +263,29 @@ class NokoteParser
     next_pos = 0
     o = ''
     pos.each_slice(2).each do |b,e|
-      o += i[next_pos..b-1]
+      o += i[next_pos..b-1] if b > 0
       o += tag + (encode i[b+dl..e-1]) + tag
       next_pos = e + dl
     end
     o += i[next_pos..-1]
   end
 
-  # return array (code, after tag there is a # ?, rest node)
+  # return array [code, after tag there is a # ?, rest node]
   def self.unpack str, tag, default = '/.*/'
     # TODO what a empty unpacked is depends on the context
     end_tag_idx = (str.rindex tag) || 0
     return [nil, nil, str] if end_tag_idx == 0 or !str.start_with? tag
+    puts str
+    puts tag.length
+    puts str[tag.length..-1]
+    puts end_tag_idx-1
+    puts str[tag.length..end_tag_idx-1]
     code = decode str[tag.length..end_tag_idx-1]
+    puts code
     hash = code[0] == '#'
     code = code[1..-1] if hash
-    node = str[end_tag_idx + tag.length..-1]
+    node = normalize_string str[end_tag_idx + tag.length..-1]
+    puts node
     return [code.empty? ? '/.*/' : code, hash, node.empty? ? nil : node]
   end
 
@@ -244,29 +302,50 @@ class NokoteParser
     match_node t, d, 'child'
   end
 
-  # functions throws or return the first node not parsed
-  def match_node t, d, s = nil
+  # functions throws if d node cannot be parsed with t
+  def match_node t, d, s = 'sibling'
     set_context t, d
     puts "  #{s}> #{t.class} : #{t} vs #{d}"
-    return d if t == nil
-    assert (d != nil), "unexpected end of document"
-    assert (t.class == d.class), "different class"
-
-    # attributes
-    ta = t.attribute_nodes
-    da = d.attribute_nodes
-    (zip_attributes ta, da).all? {|dt| match_nodea *dt}
-    # retrieve context
-    set_context t, d
+    assert (t.class == d.class), "different class: #{t.class} #{d.class}"
+    assert (t != nil || d != nil), "found nil nodes: #{t.class} #{d.class}"
 
     # the tagname
-    match_string t.name, d.name, d
+    parse_attributes = (match_string t.name, d.name, d) != true
+
+    parse_children = true
+    grammar_on_children = nil
+    # attributes
+    ta = t.attribute_nodes.sort
+    ta.each do |a|
+      un = unpack_attr a.name
+      parse_children = a.value != 'false' if un == "parse_children"
+      grammar_on_children = eval a.value if un == "grammar"
+    end
+    ta.reject! {|a| ['parse_children'].include? (unpack_attr a.name)}
+    da = d.attribute_nodes.sort
+    (zip_attributes ta, da).all? {|dt| match_nodea *dt} if parse_attributes
+    # retrieve context
+    set_context t, d
 
     # content if this is a text element
     match_string t.content, d.content if t.class == Nokogiri::XML::Text
 
     # children
-    (t.children.zip d.children).map {|dt| match_nodec *dt}.last
+    if grammar_on_children
+      # cut backtrack
+      tb = @backtrack
+      @backtrack = []
+      res = resolve grammar_on_children, d.children.first
+      # restore backtrack
+      # (lthough it's possible restore with the new backtrack points
+      # ie @backtrack = tb + @backtrack, it has no sense sine in order to
+      # simplify we don't allow a resolve to go up to the parents...
+      @backtrack = tb
+      assert res, "failed grammar"
+    elsif parse_children
+      assert (t.children.size == d.children.size), "different number of children"
+      (t.children.zip d.children).map {|dt| match_nodec *dt}
+    end
   end
 
   def unpack str, default = nil
@@ -275,7 +354,10 @@ class NokoteParser
 
   def unpack_attr string
     code, hash, node = unpack string, ''
-    hash and !node ? code : nil
+    if code != nil and (!hash or node != nil or code == '')
+      raise ArgumentError, "invalid attribute code #{[code, hash, node]}"
+    end
+    code
   end
 
   def zip_attributes ta, da
@@ -306,10 +388,11 @@ class NokoteParser
   # '&&# code && text' -> eval code with context_d, compare text against d (if text is not the empty string)
   # '&& code && text' -> eval code with d, compare text against d (if text is not the empty string)
   def match_string t, d, context_d = d
-    code, hash, node = unpack t
-    puts "    match_string #{[code, hash, node, d, context_d]}"
+    code, hash, t_text = unpack t
+    puts "    match_string #{[code, hash, t_text, d, context_d]}"
     eval_code code, (hash ? context_d : d)
-    string_comparer node, d if node != nil
+    string_comparer t_text, d if t_text != nil
+    hash
   end
 
   def eval_code code, node
@@ -346,6 +429,12 @@ class NokoteParser
     @dtag
   end
 
+  def self.normalize_string s
+    s = @@html_entities.decode s
+    s.gsub! /\s+/, ' '
+    s.strip
+  end
+
 
 
  public
@@ -357,8 +446,23 @@ class NokoteParser
     @node
   end
 
+  def raw_content
+    node.class < Nokogiri::XML::Text ? node.content : node
+  end
+
+  def content
+    normalize_string raw_content
+  end
+
+  def normalize_string s
+    self.class.normalize_string s
+  end
+
   def string_comparer s0, s1
-    assert (s0 == s1), "string comparer failed"
+    ns0 = normalize_string s0
+    ns1 = normalize_string s1
+    set_context ns0, ns1
+    assert (ns0 == ns1), "string comparer failed"
   end
 
 

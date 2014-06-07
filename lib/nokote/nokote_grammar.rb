@@ -29,11 +29,11 @@ class OnCandidates < NokoteGrammar
 end
 class Empty < NokoteGrammar
   def initialize; end
-  def to_s; "#empty_node"; end
+  def to_s; "$empty_node"; end
 end
 class FinalNode < NokoteGrammar
   def initialize; end
-  def to_s; "#final_node"; end
+  def to_s; "$final_node"; end
 end
 
 

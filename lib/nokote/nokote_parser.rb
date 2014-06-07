@@ -11,43 +11,6 @@ module Nokote
 
 class NokoteParser
  public
-=begin
-  end
-
-  def parse doc, rule, data = nil, error_message = nil, err = nil
-    @data = data
-    @tag = generate_tag doc
-    @templates = Hash[@plain_templates.map {|id,t| [id, html_parse t]}
-    doc = html_parse doc
-    resolve rule, doc
-  end
-
-  def resolve rule_id, node
-    return match_template rule_id[1..-1], node if rule_id[0] == '#'
-    rule = @rules[id]
-    
-    case rule
-    when Nokote::Repeat
-    when Nokote::Find
-    when Nokote::Match
-    when Nokote::Optional
-    else
-      raise ArgumentError 'not found rule #{rule}'
-    end
-  end
-
-  def match_template template, node
-    template = @templates
-    raise ArgumentError 'not found template #{template}' if !template
-    begin
-      match_node template, node
-    rescue NotokeParserError => ex
-      false
-    end
-  end
-=end
-
-
   # TODO change all this shit
   def self.init_encode
     Base32.table = 'abcdefghijklmnopqrstuvwxyzABCDEF'
@@ -56,8 +19,8 @@ class NokoteParser
   def self.parse_document template, doc, data = nil, error_message = nil, template_tag = '&&'
     init_encode
     tag = generate_tag doc
-    parser = self.new({'0' => '#t'}, {'t' => template}, tag, template_tag)
-    parser.parse_doc '0', doc, data, error_message
+    parser = self.new({'0' => Concat.new('#t', FinalNode.new)}, {'t' => template}, tag, template_tag)
+    nil == (parser.parse_doc '0', doc, data, error_message)
   end
 
   def initialize rules, templates, secure_tag, template_tag = '&&'
@@ -75,48 +38,41 @@ class NokoteParser
 
   def parse_doc rt, doc, data = nil, error_message = nil
     node = self.class.html_parse doc
-    parse rt, node.children[0], data, error_message
+    parse rt, node, data, error_message
   end
   def parse rt, node, data = nil, error_message = nil
     @data = data
     resolve rt, node
   end
 
-=begin
-  # return false if node cannot be parsed by template, otherwise return the
-  # first not parsed node
-  def match node, data = nil, error_message = nil
-    @data = data
-    begin
-      match_node @template, node, 'document'
-    rescue NotokeParserError => ex
-      error_message.replace "#{ex.to_s}\n  " + ex.backtrace.join("\n  ") if error_message
-      return false
-    end
-  end
-=end
 
  private
   def resolve rt, node
     res = resolve_impl rt, node
-    backtrack! while !res and backtrack?
+    backtrack! while res == false and backtrack?
     res
   end
 
   def resolve_impl rt, node
-    if rt[0] == '#'
-      template = @templates[rt[1..-1]]
-      raise ArgumentError 'not found template #{rt[1..-1]}' if template == nil
-      match_template template, node
-    else
+    puts "resolve_impl #{rt} at #{node.class}:#{node}..."
+    if rt.class < NokoteGrammar
+      res = resolve_rule rt, node
+    elsif rt[0] != '#'
       rule = @rules[rt]
-      raise ArgumentError 'not found rule #{rt}' if rule == nil
-      resolve_rule rule, node
+      raise ArgumentError, "not found rule #{rt}" if rule == nil
+      res = resolve_rule rule, node
+    else
+      template = @templates[rt[1..-1]]
+      raise ArgumentError, "not found template #{rt[1..-1]}" if template == nil
+      res = match_template template, node
     end
+    puts "resolved #{rt} at #{node.class}:#{node} : #{res == nil ? "nil" : res}"
+    res
   end
 
   def add_backtrack cc, debug_message = nil
-   @backtrack.push cc 
+    puts "< add bt #{debug_message}"
+    @backtrack.push cc 
   end
 
   def backtrack?
@@ -124,11 +80,12 @@ class NokoteParser
   end
 
   def backtrack!
+    puts "< backtrack!"
     backtrack.pop.call
   end
 
   def resolve_rule rule, node
-    puts "apply #{rule} at #{node}"
+    puts " apply #{rule} at #{node}"
     case rule
     when Optional
       rules = rule.rules.dup
@@ -182,10 +139,11 @@ class NokoteParser
   end
 
   def match_template template, node
-    puts "match #{template} at #{node}"
+    puts " match #{template} at #{node}"
     begin
-      match_node template.children[0], node
+      match_node template, node
     rescue NotokeParserError => ex
+      puts "match fails #{ex}"
       false
     end
   end
@@ -289,7 +247,7 @@ class NokoteParser
   # functions throws or return the first node not parsed
   def match_node t, d, s = nil
     set_context t, d
-    puts "#{s}> #{t.class} : #{t} vs #{d}"
+    puts "  #{s}> #{t.class} : #{t} vs #{d}"
     return d if t == nil
     assert (d != nil), "unexpected end of document"
     assert (t.class == d.class), "different class"
@@ -349,7 +307,7 @@ class NokoteParser
   # '&& code && text' -> eval code with d, compare text against d (if text is not the empty string)
   def match_string t, d, context_d = d
     code, hash, node = unpack t
-    puts "XXX #{[code, hash, node, d, context_d]}"
+    puts "    match_string #{[code, hash, node, d, context_d]}"
     eval_code code, (hash ? context_d : d)
     string_comparer node, d if node != nil
   end
@@ -361,7 +319,7 @@ class NokoteParser
       assert (re.match node), "regexp failed"
     else
       res = eval code, (default_binding node)
-      if res < NokoteGrammar
+      if res.class < NokoteGrammar
         #node = (resolve res, node)
         puts "jump from #{node} to ..."
         assert! "not implemented jumps"
@@ -420,11 +378,14 @@ class NokoteParser
     # TODO improve track
     # TODO unpack
     if !cond
-      message = %q(error matching at template:#{@tcur.line} document:#{@dcur.line} #{msg}
+      bt = caller
+      btln = bt.rindex {|x| x =~ /nokote_parser\.rb:[0-9]+:in/}
+      bt = bt[0..btln] if btln > 0
+      message = %Q(error matching at template:#{@tcur.line} document:#{@dcur.line} #{msg}
   template_node: #{@tcur}
   document_node: #{@dcur}
   at
-  #{caller.join("\n  ")})
+  #{bt.join("\n  ")})
       puts message
       raise NotokeParserError, message
       return false
